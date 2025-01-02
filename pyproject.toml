@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "probable_octo_bassoon"
+version = "0.1.0"
+description = "Script to create a number of resouces in kuadrant  with collecting the timings of the resource creation"
+authors = ["Jim Fitzpatrick <jimfity@gmail.com>"]
+readme = "README.md"
+# package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.10"
+rich = "^13.9.4"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

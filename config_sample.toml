@@ -1,0 +1,19 @@
+[test-1]
+gateways = 1
+listeners = 2
+clean_up = false
+order = ["gateway", "route", "rlp"]
+workers = 2
+
+[test-2]
+gateways = 1
+listeners = 2
+clean_up = false
+order = ["gateway", "route", "route-rlp"]
+workers = 3
+
+[test-3]
+gateways = 1
+listeners = 2
+clean_up = false
+order = ["gateway", "route", "rlp", "route-rlp"]

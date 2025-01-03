@@ -11,6 +11,7 @@ from kubernetes_asyncio import watch as k8s_watch
 from kubernetes_asyncio.client.exceptions import ApiException
 from rich import print
 from rich.progress import Progress
+from rich.prompt import Prompt
 
 KUADRANT_ZONE_ROOT_DOMAIN = "example.com"
 
@@ -449,6 +450,9 @@ async def main():
     parser.add_argument(
         "--pdb", help="Turn off rich UI if going to use pdb", action="store_true"
     )
+    parser.add_argument(
+        "--pause", help="Pause for user input before doing cleanup", action="store_true"
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.file):
@@ -513,6 +517,8 @@ async def main():
             await asyncio.gather(*consumers)
 
             if setup.get("cleanup", False):
+                if args.pause:
+                    Prompt.ask("Waiting for input before doing cleanup")
                 cleanup = [
                     asyncio.create_task(
                         cleaner(

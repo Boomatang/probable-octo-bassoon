@@ -17,7 +17,7 @@ KUADRANT_ZONE_ROOT_DOMAIN = "example.com"
 # Configure logger
 logging.basicConfig(
     filename="task_log.log",
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
@@ -107,24 +107,25 @@ class Entry:
             )
             logger.debug(f"Deletion initiated for resource {self}")
 
-            # Wait for deletion
-            watch = k8s_watch.Watch()
-            async with asyncio.timeout(timeout):
-                async for event in watch.stream(
-                    api_instance.list_namespaced_custom_object,
-                    group=self.group,
-                    version=self.version,
-                    namespace=self.namespace,
-                    plural=self.plural,
-                ):
-                    if event["object"]["metadata"]["name"] == self.name:
-                        logger.debug(
-                            f"Resource {self.name} still exists, waiting for deletion..."
-                        )
-                    else:
-                        logger.info(f"Resource {self.name} successfully deleted.")
-                        watch.stop()
-                        return
+            # BUG: There is a bug here, when try to delete a large number of resources it stops processing.
+            # # Wait for deletion
+            # watch = k8s_watch.Watch()
+            # async with asyncio.timeout(timeout):
+            #     async for event in watch.stream(
+            #         api_instance.list_namespaced_custom_object,
+            #         group=self.group,
+            #         version=self.version,
+            #         namespace=self.namespace,
+            #         plural=self.plural,
+            #     ):
+            #         if event["object"]["metadata"]["name"] == self.name:
+            #             logger.debug(
+            #                 f"Resource {self.name} still exists, waiting for deletion..."
+            #             )
+            #         else:
+            #             logger.info(f"Resource {self.name} successfully deleted.")
+            #             watch.stop()
+            #             return
         except asyncio.TimeoutError:
             logger.error(f"Timed out waiting for resource {self.name} to be deleted.")
         except ApiException as e:
@@ -134,8 +135,8 @@ class Entry:
                 logger.error(
                     f"Exception when deleting resource {self.name}: {e.reason}", e
                 )
-        finally:
-            watch.stop()
+        # finally:
+        #     watch.stop()
 
 
 def route(
@@ -471,6 +472,7 @@ async def main():
 
             await producer(queue, key, setup, progress, producer_task_id)
 
+            api_instance = k8s_client.CustomObjectsApi()
             consumers = [
                 asyncio.create_task(
                     consumer(

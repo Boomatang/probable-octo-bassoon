@@ -6,13 +6,13 @@
 # order = ["gateway", "route", "rlp"]
 # workers = 2
 #
-[test-2]
-namespace = "default"
-gateways = 1
-listeners = 2
-cleanup = true
-order = ["gateway", "route", "route-rlp"]
-workers = 3
+# [test-2]
+# namespace = "default"
+# gateways = 1
+# listeners = 2
+# cleanup = true
+# order = ["gateway", "rlp", "route", "route-rlp"]
+# workers = 3
 #
 # [test-3]
 # namespace = "default"
@@ -21,9 +21,9 @@ workers = 3
 # cleanup = true
 # order = ["gateway", "route", "rlp", "route-rlp"]
 
-# [large]
-# namespace = "default"
-# gateways = 1
-# listeners = 63
-# cleanup = true
-# order = ["gateway", "route",]
+[large]
+namespace = "default"
+gateways = 1
+listeners = 63
+cleanup = true
+order = ["gateway", "route", "rlp", "route-rlp"]

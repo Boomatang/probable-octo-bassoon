@@ -219,12 +219,28 @@ def rate_limit_policy(name: str, namespace: str, target_ref: dict) -> Entry:
             ]
         }
 
-        def ratelimit_check_on_gateway(status: dict) -> bool:
+        def ratelimit_check(status: dict) -> bool:
             conditions: dict = status.get("conditions", [])
             logger.debug("rate limit policy gateway check function")
             logger.debug(f"{conditions=}")
             for condition in conditions:
                 if condition["type"] == "Accepted" and condition["status"] == "True":
+                    return True
+            return False
+
+    elif target_ref["kind"] == "HTTPRoute":
+        data["spec"]["limits"]['"httproute-level"'] = {
+            "rates": [
+                {"limit": 3, "window": "10s"},
+            ]
+        }
+
+        def ratelimit_check(status: dict) -> bool:
+            conditions: dict = status.get("conditions", [])
+            logger.debug("rate limit policy gateway check function")
+            logger.debug(f"{conditions=}")
+            for condition in conditions:
+                if condition["type"] == "Enforced" and condition["status"] == "True":
                     return True
             return False
 
@@ -235,7 +251,7 @@ def rate_limit_policy(name: str, namespace: str, target_ref: dict) -> Entry:
         group="kuadrant.io",
         version="v1",
         plural="ratelimitpolicies",
-        check=ratelimit_check_on_gateway,
+        check=ratelimit_check,
     )
 
 
@@ -353,7 +369,13 @@ async def producer(queue, run: str, config: dict, progress, producer_task_id):
                 logger.info(f"Produced: {data}")
             elif item == "route-rlp":
                 for listener in range(listeners):
-                    data = f"route-rlp-{listener}"
+                    name = f"{run}-gw{i}-l{listener}"
+                    target_ref = {
+                        "group": "gateway.networking.k8s.io",
+                        "kind": "HTTPRoute",
+                        "name": f"{run}-gw{i}-l{listener}",
+                    }
+                    data = rate_limit_policy(name, config["namespace"], target_ref)
                     await queue.put(data)
                     progress.advance(
                         producer_task_id, 1

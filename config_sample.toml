@@ -2,7 +2,7 @@
 namespace = "default"
 gateways = 1
 listeners = 2
-clean_up = false
+cleanup = true
 order = ["gateway", "route", "rlp"]
 workers = 2
 
@@ -10,7 +10,7 @@ workers = 2
 namespace = "default"
 gateways = 1
 listeners = 2
-clean_up = false
+cleanup = true
 order = ["gateway", "route", "route-rlp"]
 workers = 3
 
@@ -18,5 +18,5 @@ workers = 3
 namespace = "default"
 gateways = 1
 listeners = 2
-clean_up = false
+cleanup = true
 order = ["gateway", "route", "rlp", "route-rlp"]

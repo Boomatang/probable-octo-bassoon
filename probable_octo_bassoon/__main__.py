@@ -89,6 +89,48 @@ class Entry:
         finally:
             watch.stop()
 
+    async def delete(self, api_instance, timeout=300):
+        try:
+            logger.info(f"Deleting custom resource: {self.name}")
+            await api_instance.delete_namespaced_custom_object(
+                group=self.group,
+                version=self.version,
+                namespace=self.namespace,
+                plural=self.plural,
+                name=self.name,
+            )
+            logger.debug(f"Deletion initiated for resource {self.name}")
+
+            # Wait for deletion
+            watch = k8s_watch.Watch()
+            async with asyncio.timeout(timeout):
+                async for event in watch.stream(
+                    api_instance.list_namespaced_custom_object,
+                    group=self.group,
+                    version=self.version,
+                    namespace=self.namespace,
+                    plural=self.plural,
+                ):
+                    if event["object"]["metadata"]["name"] == self.name:
+                        logger.debug(
+                            f"Resource {self.name} still exists, waiting for deletion..."
+                        )
+                    else:
+                        logger.info(f"Resource {self.name} successfully deleted.")
+                        watch.stop()
+                        return
+        except asyncio.TimeoutError:
+            logger.error(f"Timed out waiting for resource {self.name} to be deleted.")
+        except ApiException as e:
+            if e.status == 404:
+                logger.info(f"Resource {self.name} already deleted.")
+            else:
+                logger.error(
+                    f"Exception when deleting resource {self.name}: {e.reason}", e
+                )
+        finally:
+            watch.stop()
+
 
 def gateway(name: str, namespace: str, listeners: int, tls: bool) -> Entry:
     """Generate gateway object"""
@@ -201,7 +243,29 @@ async def producer(queue, run: str, config: dict, progress, producer_task_id):
     await queue.put(None)  # Signal completion
 
 
-async def consumer(queue, progress, consumer_task_id, consumer_id, api_instance):
+async def consumer(
+    queue, clean_up_queue, progress, consumer_task_id, consumer_id, api_instance
+):
+    """
+    Consumer processes items from the queue.
+    """
+    while True:
+        item: Entry = await queue.get()
+        if item is None:  # Stop signal received
+            queue.put_nowait(None)  # Pass the signal to other consumers
+            await clean_up_queue.put(None)
+            break
+        await clean_up_queue.put(item)
+        if type(item) != str:  # FIX: remove this check when all are of type Entry
+            await item.create(api_instance)
+            await item.accepted(api_instance)
+        progress.advance(
+            consumer_task_id, 1
+        )  # Update progress for the shared consumer bar
+        logger.info(f"Consumer-{consumer_id} processed {item}")
+
+
+async def cleaner(queue, progress, cleaner_task_id, cleaner_id, api_instance):
     """
     Consumer processes items from the queue.
     """
@@ -211,12 +275,9 @@ async def consumer(queue, progress, consumer_task_id, consumer_id, api_instance)
             queue.put_nowait(None)  # Pass the signal to other consumers
             break
         if type(item) != str:  # FIX: remove this check when all are of type Entry
-            await item.create(api_instance)
-            await item.accepted(api_instance)
-        progress.advance(
-            consumer_task_id, 1
-        )  # Update progress for the shared consumer bar
-        logger.info(f"Consumer-{consumer_id} processed {item}")
+            await item.delete(api_instance)
+        progress.advance(cleaner_task_id, 1)
+        logger.info(f"Cleaner-{cleaner_id} processed {item}")
 
 
 def number_of_tasks(config: dict) -> int:
@@ -262,6 +323,7 @@ async def main():
         setup = config[key]
 
         queue = asyncio.Queue()
+        clean_up_queue = asyncio.Queue()
         tasks_to_produce = number_of_tasks(setup)
 
         with Progress() as progress:
@@ -274,18 +336,43 @@ async def main():
             consumer_task_id = progress.add_task(
                 "[green]Consuming tasks...", total=tasks_to_produce
             )
+            if setup.get("cleanup", False):
+                cleanup_task_id = progress.add_task(
+                    "[red]Cleaning tasks...", total=tasks_to_produce
+                )
 
             await producer(queue, key, setup, progress, producer_task_id)
 
             consumers = [
                 asyncio.create_task(
-                    consumer(queue, progress, consumer_task_id, i, api_instance)
+                    consumer(
+                        queue,
+                        clean_up_queue,
+                        progress,
+                        consumer_task_id,
+                        i,
+                        api_instance,
+                    )
                 )
                 for i in range(setup.get("workers", tasks_to_produce))
             ]
 
             # Wait for all tasks to complete
             await asyncio.gather(*consumers)
+
+            if setup.get("cleanup", False):
+                cleanup = [
+                    asyncio.create_task(
+                        cleaner(
+                            clean_up_queue, progress, cleanup_task_id, i, api_instance
+                        )
+                    )
+                    for i in range(setup.get("workers", tasks_to_produce))
+                ]
+
+                # Wait for all tasks to complete
+                await asyncio.gather(*cleanup)
+
         print()
 
 

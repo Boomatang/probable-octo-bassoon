@@ -138,6 +138,66 @@ class Entry:
             watch.stop()
 
 
+def route(
+    name: str, namespace: str, parent_refs: list[dict], hostnames: list[str]
+) -> Entry:
+    """Generate rate limit policy object"""
+
+    data = {
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "HTTPRoute",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+        },
+        "spec": {
+            "parentRefs": parent_refs,
+            "hostnames": hostnames,
+            "rules": [
+                {
+                    "backendRefs": [
+                        {
+                            "group": "",
+                            "kind": "Service",
+                            "name": "httpbin",
+                            "port": 8080,
+                            "weight": 1,
+                        }
+                    ],
+                    "matches": [{"path": {"type": "PathPrefix", "value": "/"}}],
+                }
+            ],
+        },
+    }
+
+    def http_route_check(status: dict) -> bool:
+        logger.debug("HTTPRoute check function")
+        accepted = True
+        parents: list[dict] = status.get("parents", {})
+        for parent in parents:
+            conditions = parent.get("conditions", {})
+
+            found = False
+            for condition in conditions:
+                if condition["type"] == "Accepted":
+                    found = True
+                    if condition["status"] != "True":
+                        accepted = False
+            if not found:
+                accepted = False
+        return accepted
+
+    return Entry(
+        name=name,
+        namespace=namespace,
+        data=data,
+        group="gateway.networking.k8s.io",
+        version="v1",
+        plural="httproutes",
+        check=http_route_check,
+    )
+
+
 def rate_limit_policy(name: str, namespace: str, target_ref: dict) -> Entry:
     """Generate rate limit policy object"""
 
@@ -262,7 +322,18 @@ async def producer(queue, run: str, config: dict, progress, producer_task_id):
                 logger.debug(data)
             elif item == "route":
                 for listener in range(listeners):
-                    data = f"route-{listener}"
+                    name = f"{run}-gw{i}-l{listener}"
+                    parent_refs = [
+                        {
+                            "group": "gateway.networking.k8s.io",
+                            "kind": "Gateway",
+                            "name": f"{run}-gw{i}",
+                        }
+                    ]
+                    hostnames = [
+                        f"api.scale-test-{name}.{KUADRANT_ZONE_ROOT_DOMAIN}",
+                    ]
+                    data = route(name, config["namespace"], parent_refs, hostnames)
                     await queue.put(data)
                     progress.advance(
                         producer_task_id, 1

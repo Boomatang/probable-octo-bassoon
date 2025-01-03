@@ -1,10 +1,12 @@
 import argparse
 import asyncio
+import json
 import logging
 import os
 import tomllib
 from datetime import datetime
 
+import aiosqlite
 from kubernetes_asyncio import client as k8s_client
 from kubernetes_asyncio import config as k8s_config
 from kubernetes_asyncio import watch as k8s_watch
@@ -14,6 +16,7 @@ from rich.progress import Progress
 from rich.prompt import Prompt
 
 KUADRANT_ZONE_ROOT_DOMAIN = "example.com"
+DATABASE_PATH = "data.db"
 
 # Configure logger
 logging.basicConfig(
@@ -25,6 +28,29 @@ logging.basicConfig(
 logger = logging.getLogger("task_logger")
 
 
+async def create_tables():
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            """
+        CREATE TABLE IF NOT EXISTS resources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            namespace TEXT NOT NULL,
+            api_group TEXT NOT NULL,
+            version TEXT NOT NULL,
+            plural TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            run TEXT NOT NULL,
+            data BLOB NOT NULL
+
+        )
+                         """
+        )
+        await db.commit()
+        logger.debug("database tables exist")
+
+
 class Entry:
     def __init__(
         self,
@@ -34,20 +60,45 @@ class Entry:
         group: str,
         version: str,
         plural: str,
+        run: str,
         check,
     ):
         self.name = name
         self.namespace = namespace
-        self._created = None
-        self._accepted = None
+        self._created: datetime = None
+        self._accepted: datetime = None
         self.data = data
         self.group = group
         self.version = version
         self.plural = plural
         self.check = check
+        self.run = run
 
     def __repr__(self):
         return f"{self.name}, {self.plural}"
+
+    async def save(self):
+        async with aiosqlite.connect(DATABASE_PATH, timeout=30) as db:
+            data_blob = json.dumps(self.data).encode("utf-8")
+            await db.execute(
+                """
+            INSERT INTO resources (name, namespace, api_group, version, plural, created_at, accepted_at, run, data)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    self.name,
+                    self.namespace,
+                    self.group,
+                    self.version,
+                    self.plural,
+                    self._created,
+                    self._accepted,
+                    self.run,
+                    data_blob,
+                ),
+            )
+            await db.commit()
+            logger.info(f"{self} has being saved to database")
 
     async def create(self, client: k8s_client.CustomObjectsApi) -> None:
         try:
@@ -141,7 +192,7 @@ class Entry:
 
 
 def route(
-    name: str, namespace: str, parent_refs: list[dict], hostnames: list[str]
+    name: str, namespace: str, parent_refs: list[dict], hostnames: list[str], run: str
 ) -> Entry:
     """Generate rate limit policy object"""
 
@@ -197,10 +248,11 @@ def route(
         version="v1",
         plural="httproutes",
         check=http_route_check,
+        run=run,
     )
 
 
-def rate_limit_policy(name: str, namespace: str, target_ref: dict) -> Entry:
+def rate_limit_policy(name: str, namespace: str, target_ref: dict, run: str) -> Entry:
     """Generate rate limit policy object"""
 
     data = {
@@ -253,10 +305,11 @@ def rate_limit_policy(name: str, namespace: str, target_ref: dict) -> Entry:
         version="v1",
         plural="ratelimitpolicies",
         check=ratelimit_check,
+        run=run,
     )
 
 
-def gateway(name: str, namespace: str, listeners: int, tls: bool) -> Entry:
+def gateway(name: str, namespace: str, listeners: int, tls: bool, run: str) -> Entry:
     """Generate gateway object"""
 
     data = {
@@ -313,6 +366,7 @@ def gateway(name: str, namespace: str, listeners: int, tls: bool) -> Entry:
         version="v1",
         plural="gateways",
         check=check,
+        run=run,
     )
 
 
@@ -333,7 +387,9 @@ async def producer(queue, run: str, config: dict, progress, producer_task_id):
         for item in config["order"]:
             if item == "gateway":
                 name = f"{run}-gw{i}"
-                data = gateway(name, config["namespace"], listeners, use_tls(config))
+                data = gateway(
+                    name, config["namespace"], listeners, use_tls(config), run
+                )
                 await queue.put(data)
                 progress.advance(producer_task_id, 1)  # Update progress for producer
                 logger.info(f"Produced: {data.name}")
@@ -351,7 +407,7 @@ async def producer(queue, run: str, config: dict, progress, producer_task_id):
                     hostnames = [
                         f"api.scale-test-{name}.{KUADRANT_ZONE_ROOT_DOMAIN}",
                     ]
-                    data = route(name, config["namespace"], parent_refs, hostnames)
+                    data = route(name, config["namespace"], parent_refs, hostnames, run)
                     await queue.put(data)
                     progress.advance(
                         producer_task_id, 1
@@ -364,7 +420,7 @@ async def producer(queue, run: str, config: dict, progress, producer_task_id):
                     "kind": "Gateway",
                     "name": f"{run}-gw{i}",
                 }
-                data = rate_limit_policy(name, config["namespace"], target_ref)
+                data = rate_limit_policy(name, config["namespace"], target_ref, run)
                 await queue.put(data)
                 progress.advance(producer_task_id, 1)  # Update progress for producer
                 logger.info(f"Produced: {data}")
@@ -376,7 +432,7 @@ async def producer(queue, run: str, config: dict, progress, producer_task_id):
                         "kind": "HTTPRoute",
                         "name": f"{run}-gw{i}-l{listener}",
                     }
-                    data = rate_limit_policy(name, config["namespace"], target_ref)
+                    data = rate_limit_policy(name, config["namespace"], target_ref, run)
                     await queue.put(data)
                     progress.advance(
                         producer_task_id, 1
@@ -391,7 +447,13 @@ async def producer(queue, run: str, config: dict, progress, producer_task_id):
 
 
 async def consumer(
-    queue, clean_up_queue, progress, consumer_task_id, consumer_id, api_instance
+    queue,
+    clean_up_queue,
+    save_queue,
+    progress,
+    consumer_task_id,
+    consumer_id,
+    api_instance,
 ):
     """
     Consumer processes items from the queue.
@@ -401,11 +463,13 @@ async def consumer(
         if item is None:  # Stop signal received
             queue.put_nowait(None)  # Pass the signal to other consumers
             await clean_up_queue.put(None)
+            await save_queue.put(None)
             break
         await clean_up_queue.put(item)
         if type(item) != str:  # FIX: remove this check when all are of type Entry
             await item.create(api_instance)
             await item.accepted(api_instance)
+        await save_queue.put(item)
         progress.advance(
             consumer_task_id, 1
         )  # Update progress for the shared consumer bar
@@ -425,6 +489,21 @@ async def cleaner(queue, progress, cleaner_task_id, cleaner_id, api_instance):
             await item.delete(api_instance)
         progress.advance(cleaner_task_id, 1)
         logger.info(f"Cleaner-{cleaner_id} processed {item}")
+
+
+async def saver(queue, progress, save_task_id, save_id):
+    """
+    save items to the database.
+    """
+    while True:
+        item: Entry = await queue.get()
+        if item is None:  # Stop signal received
+            queue.put_nowait(None)  # Pass the signal to other consumers
+            break
+        if type(item) != str:  # FIX: remove this check when all are of type Entry
+            await item.save()
+        progress.advance(save_task_id, 1)
+        logger.info(f"Cleaner-{save_id} processed {item}")
 
 
 def number_of_tasks(config: dict) -> int:
@@ -472,6 +551,7 @@ async def main():
     await k8s_config.load_kube_config()
     api_instance = k8s_client.CustomObjectsApi()
 
+    await create_tables()
     for key in config:
         logger.info(f"starting test configuration {key}")
         print(f"[red]Running configuration {key}")
@@ -479,6 +559,7 @@ async def main():
 
         queue = asyncio.Queue()
         clean_up_queue = asyncio.Queue()
+        save_queue = asyncio.Queue()
         tasks_to_produce = number_of_tasks(setup)
 
         with Progress(disable=ui_disable) as progress:
@@ -490,6 +571,9 @@ async def main():
             # Add a single progress bar for all consumers
             consumer_task_id = progress.add_task(
                 "[green]Consuming tasks...", total=tasks_to_produce
+            )
+            save_task_id = progress.add_task(
+                "[green]Saving tasks...", total=tasks_to_produce
             )
             if setup.get("cleanup", False):
                 cleanup_task_id = progress.add_task(
@@ -504,6 +588,7 @@ async def main():
                     consumer(
                         queue,
                         clean_up_queue,
+                        save_queue,
                         progress,
                         consumer_task_id,
                         i,
@@ -513,8 +598,20 @@ async def main():
                 for i in range(setup.get("workers", tasks_to_produce))
             ]
 
+            saves = [
+                asyncio.create_task(
+                    saver(
+                        save_queue,
+                        progress,
+                        save_task_id,
+                        i,
+                    )
+                )
+                for i in range(1)
+            ]
             # Wait for all tasks to complete
             await asyncio.gather(*consumers)
+            await asyncio.gather(*saves)
 
             if setup.get("cleanup", False):
                 if args.pause:

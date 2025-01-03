@@ -1,7 +1,7 @@
 [test-1]
 namespace = "default"
 gateways = 1
-listeners = 2
+listeners = 8
 cleanup = true
 order = ["gateway", "route", "rlp", "route-rlp"]
 workers = 2

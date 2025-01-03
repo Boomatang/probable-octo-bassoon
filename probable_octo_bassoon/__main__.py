@@ -7,6 +7,7 @@ from datetime import datetime
 
 from kubernetes_asyncio import client as k8s_client
 from kubernetes_asyncio import config as k8s_config
+from kubernetes_asyncio import watch as k8s_watch
 from kubernetes_asyncio.client.exceptions import ApiException
 from rich import print
 from rich.progress import Progress
@@ -16,7 +17,7 @@ KUADRANT_ZONE_ROOT_DOMAIN = "example.com"
 # Configure logger
 logging.basicConfig(
     filename="task_log.log",
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
@@ -32,6 +33,7 @@ class Entry:
         group: str,
         version: str,
         plural: str,
+        check,
     ):
         self.name = name
         self.namespace = namespace
@@ -41,6 +43,7 @@ class Entry:
         self.group = group
         self.version = version
         self.plural = plural
+        self.check = check
 
     async def create(self, client: k8s_client.CustomObjectsApi) -> None:
         try:
@@ -56,6 +59,35 @@ class Entry:
         except ApiException as e:
             logger.error(f"failed creating {self.name}", e.reason)
             logger.debug(self)
+
+    async def accepted(
+        self, client: k8s_client.CustomObjectsApi, timeout: int = 300
+    ) -> None:
+        watch = k8s_watch.Watch()
+        try:
+            async with asyncio.timeout(timeout):
+                async for event in watch.stream(
+                    client.list_namespaced_custom_object,
+                    group=self.group,
+                    version=self.version,
+                    namespace=self.namespace,
+                    plural=self.plural,
+                ):
+                    if event["object"]["metadata"]["name"] == self.name:
+                        status = event["object"].get("status", {})
+                        if self.check(status):
+                            logger.info(f"Resource {self.name} reached target status")
+                            self._accepted = datetime.utcnow()
+                            watch.stop()
+                            return
+        except asyncio.TimeoutError:
+            logger.error(f"Timed out waiting for resource {self.name} to reach status")
+        except ApiException as e:
+            logger.error(
+                f"Exception when waiting for status of {self.name}: {e.reason}", e
+            )
+        finally:
+            watch.stop()
 
 
 def gateway(name: str, namespace: str, listeners: int, tls: bool) -> Entry:
@@ -98,6 +130,15 @@ def gateway(name: str, namespace: str, listeners: int, tls: bool) -> Entry:
             }
         data["spec"]["listeners"].append(listener)
 
+    def check(status: dict) -> bool:
+        conditions: dict = status.get("conditions", [])
+        logger.debug("gateway check function")
+        logger.debug(f"{conditions=}")
+        for condition in conditions:
+            if condition["type"] == "Programmed" and condition["status"] == "True":
+                return True
+        return False
+
     return Entry(
         name=name,
         namespace=namespace,
@@ -105,6 +146,7 @@ def gateway(name: str, namespace: str, listeners: int, tls: bool) -> Entry:
         group="gateway.networking.k8s.io",
         version="v1",
         plural="gateways",
+        check=check,
     )
 
 
@@ -170,6 +212,7 @@ async def consumer(queue, progress, consumer_task_id, consumer_id, api_instance)
             break
         if type(item) != str:  # FIX: remove this check when all are of type Entry
             await item.create(api_instance)
+            await item.accepted(api_instance)
         progress.advance(
             consumer_task_id, 1
         )  # Update progress for the shared consumer bar

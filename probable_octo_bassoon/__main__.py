@@ -45,6 +45,9 @@ class Entry:
         self.plural = plural
         self.check = check
 
+    def __repr__(self):
+        return f"{self.name}, {self.plural}"
+
     async def create(self, client: k8s_client.CustomObjectsApi) -> None:
         try:
             resp = await client.create_namespaced_custom_object(
@@ -54,15 +57,16 @@ class Entry:
                 plural=self.plural,
                 body=self.data,
             )
-            logger.info(f"Custom Resource {self.name} created: {resp}")
+            logger.info(f"Custom Resource {self} created: {resp}")
             self._created = datetime.utcnow()
         except ApiException as e:
-            logger.error(f"failed creating {self.name}", e.reason)
+            logger.error(f"failed creating {self}", e.reason)
             logger.debug(self)
 
     async def accepted(
         self, client: k8s_client.CustomObjectsApi, timeout: int = 300
     ) -> None:
+        logger.debug("starting accpeted check")
         watch = k8s_watch.Watch()
         try:
             async with asyncio.timeout(timeout):
@@ -73,25 +77,27 @@ class Entry:
                     namespace=self.namespace,
                     plural=self.plural,
                 ):
+                    logger.debug(f"{event=}")
+                    if isinstance(event, str):
+                        logger.warning(f"wtf {event=}")
+                        break
                     if event["object"]["metadata"]["name"] == self.name:
                         status = event["object"].get("status", {})
                         if self.check(status):
-                            logger.info(f"Resource {self.name} reached target status")
+                            logger.info(f"Resource {self} reached target status")
                             self._accepted = datetime.utcnow()
                             watch.stop()
                             return
         except asyncio.TimeoutError:
-            logger.error(f"Timed out waiting for resource {self.name} to reach status")
+            logger.error(f"Timed out waiting for resource {self} to reach status")
         except ApiException as e:
-            logger.error(
-                f"Exception when waiting for status of {self.name}: {e.reason}", e
-            )
+            logger.error(f"Exception when waiting for status of {self}: {e.reason}", e)
         finally:
             watch.stop()
 
     async def delete(self, api_instance, timeout=300):
         try:
-            logger.info(f"Deleting custom resource: {self.name}")
+            logger.info(f"Deleting custom resource: {self}")
             await api_instance.delete_namespaced_custom_object(
                 group=self.group,
                 version=self.version,
@@ -99,7 +105,7 @@ class Entry:
                 plural=self.plural,
                 name=self.name,
             )
-            logger.debug(f"Deletion initiated for resource {self.name}")
+            logger.debug(f"Deletion initiated for resource {self}")
 
             # Wait for deletion
             watch = k8s_watch.Watch()
@@ -130,6 +136,46 @@ class Entry:
                 )
         finally:
             watch.stop()
+
+
+def rate_limit_policy(name: str, namespace: str, target_ref: dict) -> Entry:
+    """Generate rate limit policy object"""
+
+    data = {
+        "apiVersion": "kuadrant.io/v1",
+        "kind": "RateLimitPolicy",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+        },
+        "spec": {"targetRef": target_ref, "limits": {}},
+    }
+
+    if target_ref["kind"] == "Gateway":
+        data["spec"]["limits"]['"global"'] = {
+            "rates": [
+                {"limit": 3, "window": "10s"},
+            ]
+        }
+
+        def ratelimit_check_on_gateway(status: dict) -> bool:
+            conditions: dict = status.get("conditions", [])
+            logger.debug("rate limit policy gateway check function")
+            logger.debug(f"{conditions=}")
+            for condition in conditions:
+                if condition["type"] == "Accepted" and condition["status"] == "True":
+                    return True
+            return False
+
+    return Entry(
+        name=name,
+        namespace=namespace,
+        data=data,
+        group="kuadrant.io",
+        version="v1",
+        plural="ratelimitpolicies",
+        check=ratelimit_check_on_gateway,
+    )
 
 
 def gateway(name: str, namespace: str, listeners: int, tls: bool) -> Entry:
@@ -223,7 +269,13 @@ async def producer(queue, run: str, config: dict, progress, producer_task_id):
                     )  # Update progress for producer
                     logger.info(f"Produced: {data}")
             elif item == "rlp":
-                data = "rlp"
+                name = f"{run}-gw{i}"
+                target_ref = {
+                    "group": "gateway.networking.k8s.io",
+                    "kind": "Gateway",
+                    "name": f"{run}-gw{i}",
+                }
+                data = rate_limit_policy(name, config["namespace"], target_ref)
                 await queue.put(data)
                 progress.advance(producer_task_id, 1)  # Update progress for producer
                 logger.info(f"Produced: {data}")
@@ -300,6 +352,9 @@ async def main():
 
     parser = argparse.ArgumentParser(description="run test configuration")
     parser.add_argument("file", type=str, help="Path to configuration file")
+    parser.add_argument(
+        "--pdb", help="Turn off rich UI if going to use pdb", action="store_true"
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.file):
@@ -314,6 +369,8 @@ async def main():
         print("configuration is not valid, check configuration file")
         exit(0)
 
+    ui_disable = args.pdb
+
     await k8s_config.load_kube_config()
     api_instance = k8s_client.CustomObjectsApi()
 
@@ -326,7 +383,7 @@ async def main():
         clean_up_queue = asyncio.Queue()
         tasks_to_produce = number_of_tasks(setup)
 
-        with Progress() as progress:
+        with Progress(disable=ui_disable) as progress:
             # Add producer progress bar
             producer_task_id = progress.add_task(
                 "[cyan]Producing tasks...", total=tasks_to_produce

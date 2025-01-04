@@ -463,12 +463,11 @@ async def consumer(
         if item is None:  # Stop signal received
             queue.put_nowait(None)  # Pass the signal to other consumers
             await clean_up_queue.put(None)
-            await save_queue.put(None)
             break
         await clean_up_queue.put(item)
         await item.create(api_instance)
         await item.accepted(api_instance)
-        await save_queue.put(item)
+        await item.save()
         progress.advance(
             consumer_task_id, 1
         )  # Update progress for the shared consumer bar
@@ -487,20 +486,6 @@ async def cleaner(queue, progress, cleaner_task_id, cleaner_id, api_instance):
         await item.delete(api_instance)
         progress.advance(cleaner_task_id, 1)
         logger.info(f"Cleaner-{cleaner_id} processed {item}")
-
-
-async def saver(queue, progress, save_task_id, save_id):
-    """
-    save items to the database.
-    """
-    while True:
-        item: Entry = await queue.get()
-        if item is None:  # Stop signal received
-            queue.put_nowait(None)  # Pass the signal to other consumers
-            break
-        await item.save()
-        progress.advance(save_task_id, 1)
-        logger.info(f"Cleaner-{save_id} processed {item}")
 
 
 def number_of_tasks(config: dict) -> int:
@@ -569,9 +554,6 @@ async def main():
             consumer_task_id = progress.add_task(
                 "[green]Consuming tasks...", total=tasks_to_produce
             )
-            save_task_id = progress.add_task(
-                "[green]Saving tasks...", total=tasks_to_produce
-            )
 
             await producer(queue, key, setup, progress, producer_task_id)
 
@@ -591,20 +573,8 @@ async def main():
                 for i in range(setup.get("workers", tasks_to_produce))
             ]
 
-            saves = [
-                asyncio.create_task(
-                    saver(
-                        save_queue,
-                        progress,
-                        save_task_id,
-                        i,
-                    )
-                )
-                for i in range(1)
-            ]
             # Wait for all tasks to complete
             await asyncio.gather(*consumers)
-            await asyncio.gather(*saves)
 
         if setup.get("cleanup", False):
             if args.pause:

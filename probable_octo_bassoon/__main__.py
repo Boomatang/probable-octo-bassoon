@@ -575,10 +575,6 @@ async def main():
             save_task_id = progress.add_task(
                 "[green]Saving tasks...", total=tasks_to_produce
             )
-            if setup.get("cleanup", False):
-                cleanup_task_id = progress.add_task(
-                    "[red]Cleaning tasks...", total=tasks_to_produce
-                )
 
             await producer(queue, key, setup, progress, producer_task_id)
 
@@ -613,9 +609,14 @@ async def main():
             await asyncio.gather(*consumers)
             await asyncio.gather(*saves)
 
-            if setup.get("cleanup", False):
-                if args.pause:
-                    Prompt.ask("Waiting for input before doing cleanup")
+        if setup.get("cleanup", False):
+            if args.pause:
+                Prompt.ask("Waiting for input before doing cleanup")
+            with Progress(disable=ui_disable) as progress:
+                cleanup_task_id = progress.add_task(
+                    "[red]Cleaning tasks...", total=tasks_to_produce
+                )
+
                 cleanup = [
                     asyncio.create_task(
                         cleaner(
@@ -627,7 +628,6 @@ async def main():
 
                 # Wait for all tasks to complete
                 await asyncio.gather(*cleanup)
-
         print()
 
 

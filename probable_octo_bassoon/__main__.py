@@ -466,9 +466,8 @@ async def consumer(
             await save_queue.put(None)
             break
         await clean_up_queue.put(item)
-        if type(item) != str:  # FIX: remove this check when all are of type Entry
-            await item.create(api_instance)
-            await item.accepted(api_instance)
+        await item.create(api_instance)
+        await item.accepted(api_instance)
         await save_queue.put(item)
         progress.advance(
             consumer_task_id, 1
@@ -485,8 +484,7 @@ async def cleaner(queue, progress, cleaner_task_id, cleaner_id, api_instance):
         if item is None:  # Stop signal received
             queue.put_nowait(None)  # Pass the signal to other consumers
             break
-        if type(item) != str:  # FIX: remove this check when all are of type Entry
-            await item.delete(api_instance)
+        await item.delete(api_instance)
         progress.advance(cleaner_task_id, 1)
         logger.info(f"Cleaner-{cleaner_id} processed {item}")
 
@@ -500,8 +498,7 @@ async def saver(queue, progress, save_task_id, save_id):
         if item is None:  # Stop signal received
             queue.put_nowait(None)  # Pass the signal to other consumers
             break
-        if type(item) != str:  # FIX: remove this check when all are of type Entry
-            await item.save()
+        await item.save()
         progress.advance(save_task_id, 1)
         logger.info(f"Cleaner-{save_id} processed {item}")
 

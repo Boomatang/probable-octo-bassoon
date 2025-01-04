@@ -1,10 +1,10 @@
 import argparse
 import asyncio
+import datetime
 import json
 import logging
 import os
 import tomllib
-from datetime import datetime
 
 import aiosqlite
 from kubernetes_asyncio import client as k8s_client
@@ -65,8 +65,8 @@ class Entry:
     ):
         self.name = name
         self.namespace = namespace
-        self._created: datetime = None
-        self._accepted: datetime = None
+        self._created: datetime.datetime = None
+        self._accepted: datetime.datetime = None
         self.data = data
         self.group = group
         self.version = version
@@ -110,7 +110,7 @@ class Entry:
                 body=self.data,
             )
             logger.info(f"Custom Resource {self} created: {resp}")
-            self._created = datetime.utcnow()
+            self._created = datetime.datetime.now(datetime.UTC)
         except ApiException as e:
             logger.error(f"failed creating {self}", e.reason)
             logger.debug(self)
@@ -137,7 +137,7 @@ class Entry:
                         status = event["object"].get("status", {})
                         if self.check(status):
                             logger.info(f"Resource {self} reached target status")
-                            self._accepted = datetime.utcnow()
+                            self._accepted = datetime.datetime.now(datetime.UTC)
                             watch.stop()
                             return
         except asyncio.TimeoutError:
@@ -600,4 +600,4 @@ async def main():
 
 if __name__ == "__main__":
     # Run the event loop
-    asyncio.run(main())
+    asyncio.get_event_loop().run_until_complete(main())

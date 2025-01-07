@@ -329,7 +329,9 @@ def auth_policy(name: str, namespace: str, target_ref: dict, run: str) -> Entry:
                 "unauthorized": {
                     "headers": {'"content-type"': {"value": "application/json"}},
                     "body": {
-                        "value": '{\n  "error": "Forbidden",\n  "message": "Access denied by default by the gateway operator. If you are the administrator of the service, create a specific auth policy for the route."\n}'
+                        "value": '{\n  "error": "Forbidden",\n  "message": "Access denied by default by the gateway'
+                        'operator. If you are the administrator of the service,"'
+                        'create a specific auth policy for the route."\n}'
                     },
                 }
             },
@@ -394,7 +396,9 @@ def auth_policy(name: str, namespace: str, target_ref: dict, run: str) -> Entry:
     )
 
 
-def gateway(name: str, namespace: str, listeners: int, tls: bool, run: str) -> Entry:
+def gateway_config(
+    name: str, namespace: str, listeners: int, tls: bool, run: str
+) -> Entry:
     """Generate gateway object"""
 
     data = {
@@ -467,93 +471,116 @@ async def producer(queue, run: str, config: dict, progress, producer_task_id):
     """
 
     for i in range(config["gateways"]):
-        data = None
         listeners = config.get("listeners", 1)
         for item in config["order"]:
             if item == "gateway":
-                name = f"{run}-gw{i}"
-                data = gateway(
-                    name, config["namespace"], listeners, use_tls(config), run
+                await create_gateway(
+                    listeners, run, i, config, progress, producer_task_id, queue
                 )
-                await queue.put(data)
-                progress.advance(producer_task_id, 1)  # Update progress for producer
-                logger.info(f"Produced: {data.name}")
-                logger.debug(data)
             elif item == "route":
-                for listener in range(listeners):
-                    name = f"{run}-gw{i}-l{listener}"
-                    parent_refs = [
-                        {
-                            "group": "gateway.networking.k8s.io",
-                            "kind": "Gateway",
-                            "name": f"{run}-gw{i}",
-                        }
-                    ]
-                    hostnames = [
-                        f"api.scale-test-{name}.{KUADRANT_ZONE_ROOT_DOMAIN}",
-                    ]
-                    data = route(name, config["namespace"], parent_refs, hostnames, run)
-                    await queue.put(data)
-                    progress.advance(
-                        producer_task_id, 1
-                    )  # Update progress for producer
-                    logger.info(f"Produced: {data}")
+                await create_routes(
+                    listeners, run, i, config, progress, producer_task_id, queue
+                )
             elif item == "rlp":
-                name = f"{run}-gw{i}"
-                target_ref = {
-                    "group": "gateway.networking.k8s.io",
-                    "kind": "Gateway",
-                    "name": f"{run}-gw{i}",
-                }
-                data = rate_limit_policy(name, config["namespace"], target_ref, run)
-                await queue.put(data)
-                progress.advance(producer_task_id, 1)  # Update progress for producer
-                logger.info(f"Produced: {data}")
+                await gateway_rlp(run, i, config, progress, producer_task_id, queue)
             elif item == "route-rlp":
-                for listener in range(listeners):
-                    name = f"{run}-gw{i}-l{listener}"
-                    target_ref = {
-                        "group": "gateway.networking.k8s.io",
-                        "kind": "HTTPRoute",
-                        "name": f"{run}-gw{i}-l{listener}",
-                    }
-                    data = rate_limit_policy(name, config["namespace"], target_ref, run)
-                    await queue.put(data)
-                    progress.advance(
-                        producer_task_id, 1
-                    )  # Update progress for producer
-                    logger.info(f"Produced: {data}")
+                await route_rlp(
+                    listeners, run, i, config, progress, producer_task_id, queue
+                )
             elif item == "auth":
-                name = f"{run}-gw{i}"
-                target_ref = {
-                    "group": "gateway.networking.k8s.io",
-                    "kind": "Gateway",
-                    "name": f"{run}-gw{i}",
-                }
-                data = auth_policy(name, config["namespace"], target_ref, run)
-                await queue.put(data)
-                progress.advance(producer_task_id, 1)  # Update progress for producer
-                logger.info(f"Produced: {data}")
+                await gateway_auth(run, i, config, progress, producer_task_id, queue)
             elif item == "route-auth":
-                for listener in range(listeners):
-                    name = f"{run}-gw{i}-l{listener}"
-                    target_ref = {
-                        "group": "gateway.networking.k8s.io",
-                        "kind": "HTTPRoute",
-                        "name": f"{run}-gw{i}-l{listener}",
-                    }
-                    data = auth_policy(name, config["namespace"], target_ref, run)
-                    await queue.put(data)
-                    progress.advance(
-                        producer_task_id, 1
-                    )  # Update progress for producer
-                    logger.info(f"Produced: {data}")
+                await route_auth(
+                    listeners, run, i, config, progress, producer_task_id, queue
+                )
             else:
                 logger.error(f"unknown data type {item}")
                 print("error, check log")
                 exit(1)
 
     await queue.put(None)  # Signal completion
+
+
+async def create_gateway(listeners, run, gateway, config, progress, task_id, queue):
+    name = f"{run}-gw{gateway}"
+    data = gateway_config(name, config["namespace"], listeners, use_tls(config), run)
+    await queue.put(data)
+    progress.advance(task_id, 1)  # Update progress for producer
+    logger.info(f"Produced: {data.name}")
+    logger.debug(data)
+
+
+async def create_routes(listeners, run, gateway, config, progress, task_id, queue):
+    for listener in range(listeners):
+        name = f"{run}-gw{gateway}-l{listener}"
+        parent_refs = [
+            {
+                "group": "gateway.networking.k8s.io",
+                "kind": "Gateway",
+                "name": f"{run}-gw{gateway}",
+            }
+        ]
+        hostnames = [
+            f"api.scale-test-{name}.{KUADRANT_ZONE_ROOT_DOMAIN}",
+        ]
+        data = route(name, config["namespace"], parent_refs, hostnames, run)
+        await queue.put(data)
+        progress.advance(task_id, 1)  # Update progress for producer
+        logger.info(f"Produced: {data}")
+
+
+async def gateway_rlp(run, gateway, config, progress, task_id, queue):
+    name = f"{run}-gw{gateway}"
+    target_ref = {
+        "group": "gateway.networking.k8s.io",
+        "kind": "Gateway",
+        "name": f"{run}-gw{gateway}",
+    }
+    data = rate_limit_policy(name, config["namespace"], target_ref, run)
+    await queue.put(data)
+    progress.advance(task_id, 1)  # Update progress for producer
+    logger.info(f"Produced: {data}")
+
+
+async def route_rlp(listeners, run, gateway, config, progress, task_id, queue):
+    for listener in range(listeners):
+        name = f"{run}-gw{gateway}-l{listener}"
+        target_ref = {
+            "group": "gateway.networking.k8s.io",
+            "kind": "HTTPRoute",
+            "name": f"{run}-gw{gateway}-l{listener}",
+        }
+        data = rate_limit_policy(name, config["namespace"], target_ref, run)
+        await queue.put(data)
+        progress.advance(task_id, 1)  # Update progress for producer
+        logger.info(f"Produced: {data}")
+
+
+async def gateway_auth(run, gateway, config, progress, task_id, queue):
+    name = f"{run}-gw{gateway}"
+    target_ref = {
+        "group": "gateway.networking.k8s.io",
+        "kind": "Gateway",
+        "name": f"{run}-gw{gateway}",
+    }
+    data = auth_policy(name, config["namespace"], target_ref, run)
+    await queue.put(data)
+    progress.advance(task_id, 1)  # Update progress for producer
+    logger.info(f"Produced: {data}")
+
+
+async def route_auth(listeners, run, gateway, config, progress, task_id, queue):
+    for listener in range(listeners):
+        name = f"{run}-gw{gateway}-l{listener}"
+        target_ref = {
+            "group": "gateway.networking.k8s.io",
+            "kind": "HTTPRoute",
+            "name": f"{run}-gw{gateway}-l{listener}",
+        }
+        data = auth_policy(name, config["namespace"], target_ref, run)
+        await queue.put(data)
+        progress.advance(task_id, 1)  # Update progress for producer
+        logger.info(f"Produced: {data}")
 
 
 async def consumer(

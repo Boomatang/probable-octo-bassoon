@@ -14,10 +14,10 @@
 # order = ["gateway", "route", "auth", "route-auth"]
 # workers = 2
 
-# [all]
-# namespace = "default"
-# gateways = 1
-# listeners = 5
-# cleanup = true
-# order = ["gateway", "route", "auth", "rlp", "route-auth", "route-rlp"]
-# workers = 2
+[all]
+namespace = "default"
+gateways = 2
+listeners = 2
+cleanup = true
+order = ["gateway", "route", "auth", "rlp", "route-auth", "route-rlp"]
+workers = 2

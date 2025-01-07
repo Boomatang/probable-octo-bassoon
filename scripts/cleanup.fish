@@ -6,7 +6,7 @@ if test (count $argv) -lt 1
 end
 
 set namespace $argv[1]
-set resources "ratelimitpolicy" "gateway" "httproute"
+set resources "authpolicy" "ratelimitpolicy" "gateway" "httproute"
 
 for resource in $resources
 	# Attempt to delete resources

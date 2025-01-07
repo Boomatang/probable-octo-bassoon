@@ -40,7 +40,7 @@ async def create_tables():
             version TEXT NOT NULL,
             plural TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            accepted_at TEXT NOT NULL,
+            accepted_at TEXT,
             run TEXT NOT NULL,
             data BLOB NOT NULL
 
@@ -309,6 +309,91 @@ def rate_limit_policy(name: str, namespace: str, target_ref: dict, run: str) -> 
     )
 
 
+def auth_policy(name: str, namespace: str, target_ref: dict, run: str) -> Entry:
+    """Generate auth policy object"""
+
+    data = {
+        "apiVersion": "kuadrant.io/v1",
+        "kind": "AuthPolicy",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+        },
+        "spec": {"targetRef": target_ref, "rules": {}},
+    }
+
+    if target_ref["kind"] == "Gateway":
+        data["spec"]["rules"] = {
+            "authorization": {"allow-all": {"opa": {"rego": "allow = false"}}},
+            "response": {
+                "unauthorized": {
+                    "headers": {'"content-type"': {"value": "application/json"}},
+                    "body": {
+                        "value": '{\n  "error": "Forbidden",\n  "message": "Access denied by default by the gateway operator. If you are the administrator of the service, create a specific auth policy for the route."\n}'
+                    },
+                }
+            },
+        }
+
+        def auth_check(status: dict) -> bool:
+            conditions: dict = status.get("conditions", [])
+            logger.debug("auth policy gateway check function")
+            logger.debug(f"{conditions=}")
+            for condition in conditions:
+                if condition["type"] == "Accepted" and condition["status"] == "True":
+                    return True
+            return False
+
+    elif target_ref["kind"] == "HTTPRoute":
+        data["spec"]["rules"] = {
+            "authorization": {"allow-all": {"opa": {"rego": "allow = true"}}},
+            "authentication": {
+                "api-key-users": {
+                    "apiKey": {
+                        "allNamespaces": True,
+                        "selector": {"matchLabels": {"app": "scale-test"}},
+                    },
+                    "credentials": {"authorizationHeader": {"prefix": "APIKEY"}},
+                }
+            },
+            "response": {
+                "success": {
+                    "filters": {
+                        "identity": {
+                            "json": {
+                                "properties": {
+                                    "userid": {
+                                        "selector": "auth.identity.metadata.annotations.secret\\.kuadrant\\.io/user-id"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        }
+
+        def auth_check(status: dict) -> bool:
+            conditions: dict = status.get("conditions", [])
+            logger.debug("auth policy gateway check function")
+            logger.debug(f"{conditions=}")
+            for condition in conditions:
+                if condition["type"] == "Enforced" and condition["status"] == "True":
+                    return True
+            return False
+
+    return Entry(
+        name=name,
+        namespace=namespace,
+        data=data,
+        group="kuadrant.io",
+        version="v1",
+        plural="authpolicies",
+        check=auth_check,
+        run=run,
+    )
+
+
 def gateway(name: str, namespace: str, listeners: int, tls: bool, run: str) -> Entry:
     """Generate gateway object"""
 
@@ -433,6 +518,31 @@ async def producer(queue, run: str, config: dict, progress, producer_task_id):
                         "name": f"{run}-gw{i}-l{listener}",
                     }
                     data = rate_limit_policy(name, config["namespace"], target_ref, run)
+                    await queue.put(data)
+                    progress.advance(
+                        producer_task_id, 1
+                    )  # Update progress for producer
+                    logger.info(f"Produced: {data}")
+            elif item == "auth":
+                name = f"{run}-gw{i}"
+                target_ref = {
+                    "group": "gateway.networking.k8s.io",
+                    "kind": "Gateway",
+                    "name": f"{run}-gw{i}",
+                }
+                data = auth_policy(name, config["namespace"], target_ref, run)
+                await queue.put(data)
+                progress.advance(producer_task_id, 1)  # Update progress for producer
+                logger.info(f"Produced: {data}")
+            elif item == "route-auth":
+                for listener in range(listeners):
+                    name = f"{run}-gw{i}-l{listener}"
+                    target_ref = {
+                        "group": "gateway.networking.k8s.io",
+                        "kind": "HTTPRoute",
+                        "name": f"{run}-gw{i}-l{listener}",
+                    }
+                    data = auth_policy(name, config["namespace"], target_ref, run)
                     await queue.put(data)
                     progress.advance(
                         producer_task_id, 1
@@ -600,4 +710,4 @@ async def main():
 
 if __name__ == "__main__":
     # Run the event loop
-    asyncio.get_event_loop().run_until_complete(main())
+    asyncio.run(main())

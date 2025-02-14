@@ -1,8 +1,12 @@
+import argparse
 import logging
+import os
 import sys
+import tomllib
 from datetime import datetime
 
 import kopf
+import requests
 from pony.orm import Database, Optional, PrimaryKey, db_session
 
 db = Database()
@@ -18,6 +22,8 @@ class Event(db.Entity):
     enfocred = Optional(str, nullable=True)
     accepted = Optional(str, nullable=True)
     ready = Optional(str, nullable=True)
+    version = Optional(int, nullable=True)
+    applied_at = Optional(datetime)
 
 
 db.bind(provider="sqlite", filename="database.sqlite", create_db=True)
@@ -35,6 +41,49 @@ def get_logger(logger_name=None):
 
 
 log = get_logger("collector")
+
+TICKER = 1
+
+
+@kopf.on.startup()
+def startup(memo: kopf.Memo, **kwargs):
+    global TICKER
+    parser = argparse.ArgumentParser(description="run test configuration")
+    parser.add_argument("file", type=str, help="Path to configuration file")
+    args = parser.parse_args()
+
+    if not os.path.isfile(args.file):
+        log.error("file does not exist")
+        print("file does not exist")
+        exit(1)
+
+    with open(args.file, "rb") as f:
+        config = tomllib.load(f)
+
+    memo.setup = config["setup"]
+    memo.limitador = {"config_version": None}
+    TICKER = config["setup"]["limitador"]["ticker"]
+
+
+@kopf.timer(kind="Limitador", interval=TICKER, sharp=True)
+@db_session
+def ping_limitador_status(memo: kopf.Memo, **kwargs):
+    url = f"{memo['setup']['limitador']['url']}:{memo['setup']['limitador']['port']}/status"
+    resp = requests.get(url, timeout=3)
+    if resp.status_code != 200:
+        log.error("unable to ping limitador status", url)
+        return None
+    data = resp.json()
+    if data["config_version"] == memo["limitador"]["config_version"]:
+        return None
+
+    log.info(data)
+    memo["limitador"]["config_version"] = data["config_version"]
+    e = Event()
+    e.name = "limitador pod"
+    e.changed = "internal config"
+    e.version = data["config_version"]
+    e.applied_at = data["config_applied_at"][:26]
 
 
 @kopf.on.resume(kind="AuthPolicy", param="AuthPolicy")

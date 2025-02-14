@@ -1,10 +1,15 @@
+[setup.limitador]
+url = "http://localhost"
+port = 8080
+ticker = 1
+
 [ratelimit]
 namespace = "default"
-gateways = 1
-listeners = 30
+gateways = 3
+listeners = 15
 cleanup = true
 order = ["gateway", "route", "rlp", "route-rlp"]
-workers = 2
+workers = 1
 
 # [auth]
 # namespace = "default"
@@ -16,8 +21,8 @@ workers = 2
 
 # [all]
 # namespace = "default"
-# gateways = 1
-# listeners = 25
+# gateways = 2
+# listeners = 15
 # cleanup = true
 # order = ["gateway", "route", "auth", "rlp", "route-auth", "route-rlp"]
-# workers = 20
+# workers = 2

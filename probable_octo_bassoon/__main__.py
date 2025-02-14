@@ -672,6 +672,8 @@ async def main():
 
     await create_tables()
     for key in config:
+        if key == "setup":
+            continue
         logger.info(f"starting test configuration {key}")
         print(f"[red]Running configuration {key}")
         setup = config[key]

@@ -13,6 +13,7 @@ kubernetes-asyncio = "^32.0.0"
 aiosqlite = "^0.20.0"
 kopf = "^1.37.4"
 pyyaml = "^6.0.2"
+pony = "^0.7.19"
 
 
 [build-system]

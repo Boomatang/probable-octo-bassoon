@@ -173,3 +173,5 @@ cython_debug/
 # project added
 task_log.log
 runs/
+*.db
+*.sqlite

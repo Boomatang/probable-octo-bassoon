@@ -1,10 +1,10 @@
-# [ratelimit]
-# namespace = "default"
-# gateways = 1
-# listeners = 20
-# cleanup = true
-# order = ["gateway", "route", "rlp", "route-rlp"]
-# workers = 2
+[ratelimit]
+namespace = "default"
+gateways = 1
+listeners = 30
+cleanup = true
+order = ["gateway", "route", "rlp", "route-rlp"]
+workers = 2
 
 # [auth]
 # namespace = "default"
@@ -14,10 +14,10 @@
 # order = ["gateway", "route", "auth", "route-auth"]
 # workers = 2
 
-[all]
-namespace = "default"
-gateways = 2
-listeners = 2
-cleanup = true
-order = ["gateway", "route", "auth", "rlp", "route-auth", "route-rlp"]
-workers = 2
+# [all]
+# namespace = "default"
+# gateways = 1
+# listeners = 25
+# cleanup = true
+# order = ["gateway", "route", "auth", "rlp", "route-auth", "route-rlp"]
+# workers = 20

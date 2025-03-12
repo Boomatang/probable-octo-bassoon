@@ -5,8 +5,8 @@ ticker = 1
 
 [ratelimit]
 namespace = "default"
-gateways = 3
-listeners = 15
+gateways = 1
+listeners = 45
 cleanup = true
 order = ["gateway", "route", "rlp", "route-rlp"]
 workers = 1

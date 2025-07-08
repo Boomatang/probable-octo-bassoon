@@ -4,7 +4,9 @@ import datetime
 import json
 import logging
 import os
+import random
 import tomllib
+import traceback
 
 import aiosqlite
 from kubernetes_asyncio import client as k8s_client
@@ -18,10 +20,14 @@ from rich.prompt import Prompt
 KUADRANT_ZONE_ROOT_DOMAIN = "example.com"
 DATABASE_PATH = "data.db"
 
+# Global list to store created resources for random label updates
+created_resources = []
+resource_lock = asyncio.Lock()
+
 # Configure logger
 logging.basicConfig(
     filename="task_log.log",
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
@@ -189,6 +195,56 @@ class Entry:
                 )
         # finally:
         #     watch.stop()
+
+    async def update(
+        self, client: k8s_client.CustomObjectsApi, label_updates: dict
+    ) -> None:
+        """Update labels on the resource"""
+        try:
+            logger.debug(
+                f"Getting current resource: {self.group}/{self.version} {self.namespace}/{self.plural}/{self.name}"
+            )
+
+            # Get the current resource
+            current_resource = await client.get_namespaced_custom_object(
+                group=self.group,
+                version=self.version,
+                namespace=self.namespace,
+                plural=self.plural,
+                name=self.name,
+            )
+
+            logger.debug(
+                f"Retrieved resource {self.name},"
+                f"current labels: {current_resource.get('metadata', {}).get('labels', {})}"
+            )
+
+            # Update the labels
+            if "labels" not in current_resource["metadata"]:
+                current_resource["metadata"]["labels"] = {}
+
+            current_resource["metadata"]["labels"].update(label_updates)
+
+            logger.debug(
+                f"Updated labels will be: {current_resource['metadata']['labels']}"
+            )
+
+            # Apply the update
+            await client.replace_namespaced_custom_object(
+                group=self.group,
+                version=self.version,
+                namespace=self.namespace,
+                plural=self.plural,
+                name=self.name,
+                body=current_resource,
+            )
+            logger.info(f"Successfully updated labels for {self}: {label_updates}")
+        except ApiException as e:
+            logger.error(f"Failed to update labels for {self}: {e.reason}")
+            logger.error(f"API Exception details: status={e.status}, body={e.body}")
+        except Exception as e:
+            logger.error(f"Unexpected error updating labels for {self}: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
 
 def route(
@@ -605,6 +661,14 @@ async def consumer(
         await item.create(api_instance)
         await item.accepted(api_instance)
         await item.save()
+
+        # Add successfully created resource to the global list for random updates
+        async with resource_lock:
+            created_resources.append(item)
+            logger.info(
+                f"Added {item} to created_resources list. Total: {len(created_resources)}"
+            )
+
         progress.advance(
             consumer_task_id, 1
         )  # Update progress for the shared consumer bar
@@ -623,6 +687,70 @@ async def cleaner(queue, progress, cleaner_task_id, cleaner_id, api_instance):
         await item.delete(api_instance)
         progress.advance(cleaner_task_id, 1)
         logger.info(f"Cleaner-{cleaner_id} processed {item}")
+
+
+async def random_label_updater(api_instance, progress, task_id):
+    """
+    Randomly update labels on deployed resources every second for one minute.
+    """
+
+    logger.info("Starting random label updater for 60 seconds")
+
+    # Track label update counter per resource
+    label_counters = {}
+
+    # Run for 60 seconds
+    for second in range(60):
+        pause = asyncio.sleep(1)
+        async with resource_lock:
+            logger.debug(
+                f"Second {second + 1}/60 - Total resources available: {len(created_resources)}"
+            )
+            if not created_resources:
+                logger.warning("No resources available for random updates")
+                # Still advance progress even if no resources available
+                progress.advance(task_id, 1)
+                await pause
+                continue
+
+            # Randomly select a resource
+            selected_resource = random.choice(created_resources)  # nosec
+            logger.info(
+                f"Selected resource for update: {selected_resource}"
+                f"({selected_resource.group}/{selected_resource.version})"
+            )
+
+        # Get current counter for this resource
+        resource_key = f"{selected_resource.name}-{selected_resource.namespace}"
+        current_counter = label_counters.get(resource_key, 0) + 1
+        label_counters[resource_key] = current_counter
+
+        # Update the label with incremented counter
+        label_updates = {
+            "random-update-counter": str(current_counter),
+            "last-updated": str(int(asyncio.get_event_loop().time())),
+        }
+
+        logger.info(
+            f"Attempting to update {selected_resource} with labels: {label_updates}"
+        )
+
+        try:
+            await selected_resource.update(api_instance, label_updates)
+            logger.info(
+                f"Successfully updated {selected_resource} with counter {current_counter}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to update {selected_resource}: {e}")
+            logger.error(f"Update error traceback: {traceback.format_exc()}")
+
+        progress.advance(task_id, 1)
+
+        # Wait 1 second before next update
+        await pause
+
+    logger.info("Random label updater completed")
 
 
 def number_of_tasks(config: dict) -> int:
@@ -651,6 +779,11 @@ async def main():
     parser.add_argument(
         "--pause", help="Pause for user input before doing cleanup", action="store_true"
     )
+    parser.add_argument(
+        "--random-updates",
+        help="Enable random label updates on deployed resources",
+        action="store_true",
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.file):
@@ -677,6 +810,10 @@ async def main():
         logger.info(f"starting test configuration {key}")
         print(f"[red]Running configuration {key}")
         setup = config[key]
+
+        # Clear created resources list at the start of each configuration
+        async with resource_lock:
+            created_resources.clear()
 
         queue = asyncio.Queue()
         clean_up_queue = asyncio.Queue()
@@ -715,6 +852,16 @@ async def main():
             # Wait for all tasks to complete
             await asyncio.gather(*consumers)
 
+        # Run random label updater if enabled
+        if args.random_updates:
+            print("[yellow]Starting random label updates for 60 seconds...")
+            with Progress(disable=ui_disable) as progress:
+                updater_task_id = progress.add_task(
+                    "[yellow]Random label updates...", total=60
+                )
+                await random_label_updater(api_instance, progress, updater_task_id)
+            print("[yellow]Random label updates completed")
+
         if setup.get("cleanup", False):
             if args.pause:
                 Prompt.ask("Waiting for input before doing cleanup")
@@ -734,6 +881,9 @@ async def main():
 
                 # Wait for all tasks to complete
                 await asyncio.gather(*cleanup)
+            # Clear the created resources list after cleanup
+            async with resource_lock:
+                created_resources.clear()
         print()
 
 
